@@ -1,5 +1,5 @@
-from crewai import Agent
-from crewai.llm import LLM
+from crewai import Agent, LLM
+# from crewai.llm import LLM
 from dotenv import load_dotenv
 import os
 
@@ -107,7 +107,7 @@ Generate the COMPLETE UPDATED HTML code:
 
 if __name__ == "__main__":
     test_prompt = "Create a simple hello world HTML page"
-    model_name = "claude-sonnet-4.5"
+    model_name = "llama-3.3-70b"
     try:
         html_code = generate_initial_code(test_prompt, model_name)
         print("Generated HTML Code:\n", html_code)
