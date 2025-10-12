@@ -1,1 +1,27 @@
+# Ignore virtual environment folders
+venv/
+env/
+.multiagent-env/
+
+# Ignore Python bytecode files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore environment variables file with secrets
 .env
+
+# Ignore editor/IDE files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Ignore Python egg/build files
+*.egg-info/
+dist/
+build/
+
+# Ignore logs and misc files
+*.log
+*.bak
