@@ -1,7 +1,7 @@
-fastapi==0.104.1
-uvicorn==0.24.0
-crewai==0.1.0
-langchain-groq==0.0.1
-langchain-anthropic==0.1.0
-python-dotenv==1.0.0
-pydantic==2.5.0
+fastapi
+uvicorn
+crewai
+langchain-groq
+langchain-anthropic
+python-dotenv
+pydantic
