@@ -119,7 +119,7 @@ def get_llm(model_name: str):
         return LLM(
             model="groq/llama-3.3-70b-versatile",
             temperature=0.7,
-            max_tokens=50000
+            max_tokens=29000
         )
 
 
