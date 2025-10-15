@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ import json
 import asyncio
 from dotenv import load_dotenv
 from agent import generate_initial_code, update_existing_code
+from supabase import create_client, Client
 
 load_dotenv()
 
@@ -35,6 +36,10 @@ class GenerateRequest(BaseModel):
     user_id: str = None
     session_id: str = None
 
+class AsyncGenerateRequest(GenerateRequest):
+    supabase_url: str
+    supabase_key: str
+
 class GenerateResponse(BaseModel):
     html: str
     success: bool
@@ -49,13 +54,14 @@ class GenerateResponse(BaseModel):
 def read_root():
     return {
         "status": "Garliq AI Agent Service - Enhanced Edition",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "features": [
             "Real-time web search via Perplexity AI",
             "Actual token usage tracking",
             "Daily generation limits for free tier",
             "Enhanced micro-app generation",
-            "Automatic citations and sources"
+            "Automatic citations and sources",
+            "Async background processing"
         ]
     }
 
@@ -69,12 +75,143 @@ def health_check():
             "search": "Perplexity AI unified (research + web)" if perplexity_configured else "Not configured",
             "real_time_data": perplexity_configured,
             "citations": perplexity_configured,
-            "token_tracking": True
+            "token_tracking": True,
+            "async_processing": True
         }
     }
 
 
-# ==================== STREAMING GENERATION ====================
+# ==================== ASYNC BACKGROUND GENERATION ====================
+
+async def process_generation_background(request: AsyncGenerateRequest):
+    """Process generation in background and update Supabase"""
+    supabase: Client = create_client(request.supabase_url, request.supabase_key)
+    
+    tokens_used = 0
+    generation_success = False
+    html_result = ""
+    
+    try:
+        print(f"🔥 Starting background generation for session: {request.session_id}")
+        
+        # Generate code
+        if request.current_code:
+            result = update_existing_code(
+                current_code=request.current_code,
+                user_message=request.prompt,
+                chat_history=[msg.dict() for msg in request.chat_history],
+                model_name=request.model
+            )
+        else:
+            result = generate_initial_code(
+                prompt=request.prompt,
+                model_name=request.model
+            )
+        
+        html_result = result['html']
+        tokens_used = result['total_tokens']
+        generation_success = True
+        
+        print(f"✅ Generation complete. Tokens used: {tokens_used}")
+        
+        # ==================== SAVE TO DATABASE ====================
+        if html_result and generation_success:
+            # Save chat messages
+            supabase.table('chat_messages').insert({
+                'session_id': request.session_id,
+                'role': 'user',
+                'content': request.prompt
+            }).execute()
+
+            supabase.table('chat_messages').insert({
+                'session_id': request.session_id,
+                'role': 'assistant',
+                'content': 'Generated code successfully'
+            }).execute()
+
+            # Update project's html_code
+            supabase.table('projects').update({ 
+                'html_code': html_result,
+                'updated_at': 'now()'
+            }).eq('session_id', request.session_id).execute()
+
+            print('✅ Project html_code updated')
+
+            # Update status to completed
+            supabase.table('sessions').update({ 
+                'generation_status': 'completed',
+                'generation_error': None
+            }).eq('id', request.session_id).execute()
+
+            # ==================== DEDUCT TOKENS FOR CLAUDE ====================
+            if request.model == 'claude-sonnet-4.5':
+                tokens_to_deduct = tokens_used if tokens_used > 0 else 2000
+                
+                print(f"🔍 Deducting {tokens_to_deduct} tokens for user {request.user_id}")
+                
+                result = supabase.rpc('deduct_tokens_with_tracking', {
+                    'p_user_id': request.user_id,
+                    'p_amount': tokens_to_deduct,
+                    'p_description': f'Code generation with {request.model} ({tokens_to_deduct} tokens)',
+                    'p_session_id': request.session_id
+                }).execute()
+
+                if result.data:
+                    print(f"✅ Tokens deducted. New balance: {result.data.get('new_balance')}")
+                else:
+                    print(f"⚠️ Token deduction issue: {result}")
+
+        else:
+            # Generation failed
+            supabase.table('sessions').update({ 
+                'generation_status': 'failed',
+                'generation_error': 'No HTML generated'
+            }).eq('id', request.session_id).execute()
+
+            # FAILURE: Deduct 2000 tokens for Claude
+            if request.model == 'claude-sonnet-4.5':
+                supabase.rpc('deduct_tokens_with_tracking', {
+                    'p_user_id': request.user_id,
+                    'p_amount': 2000,
+                    'p_description': f'Generation failure penalty - {request.model}',
+                    'p_session_id': request.session_id
+                }).execute()
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Background generation error: {error_msg}")
+        
+        supabase.table('sessions').update({ 
+            'generation_status': 'failed',
+            'generation_error': error_msg
+        }).eq('id', request.session_id).execute()
+
+        # ERROR: Deduct 2000 tokens for Claude
+        if request.model == 'claude-sonnet-4.5':
+            supabase.rpc('deduct_tokens_with_tracking', {
+                'p_user_id': request.user_id,
+                'p_amount': 2000,
+                'p_description': f'Error penalty - {request.model}',
+                'p_session_id': request.session_id
+            }).execute()
+
+
+@app.post("/generate-async")
+async def generate_code_async(request: AsyncGenerateRequest, background_tasks: BackgroundTasks):
+    """
+    Async endpoint - Returns immediately, processes in background
+    Frontend listens to Supabase Realtime for status updates
+    """
+    background_tasks.add_task(process_generation_background, request)
+    
+    return JSONResponse({
+        "success": True,
+        "message": "Generation started in background",
+        "session_id": request.session_id
+    })
+
+
+# ==================== STREAMING GENERATION (Keep for backward compatibility) ====================
 
 async def generate_stream(request: GenerateRequest):
     """Stream generation progress to frontend with token tracking"""
@@ -83,50 +220,19 @@ async def generate_stream(request: GenerateRequest):
     html_result = ""
     
     try:
-        # Validate model
         if request.model not in ["llama-3.3-70b", "claude-sonnet-4.5"]:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Invalid model selected'})}\n\n"
             return
         
-        # Send initial status
         yield f"data: {json.dumps({'type': 'status', 'message': 'Initializing AI agent...'})}\n\n"
         await asyncio.sleep(0.3)
         
-        # Tool availability message for Claude
-        if request.model == "claude-sonnet-4.5":
-            perplexity_status = "🌐 Web search tools activated (Perplexity AI)..." if os.getenv("PERPLEXITY_API_KEY") else "⚠️ Web search not configured"
-            yield f"data: {json.dumps({'type': 'status', 'message': perplexity_status})}\n\n"
-            await asyncio.sleep(0.4)
-        
-        yield f"data: {json.dumps({'type': 'status', 'message': 'Analyzing your prompt...'})}\n\n"
-        await asyncio.sleep(0.5)
-        
-        if request.current_code:
-            yield f"data: {json.dumps({'type': 'status', 'message': 'Reading current code structure...'})}\n\n"
-            await asyncio.sleep(0.4)
-            yield f"data: {json.dumps({'type': 'status', 'message': 'Planning modifications...'})}\n\n"
-            await asyncio.sleep(0.3)
-        else:
-            yield f"data: {json.dumps({'type': 'status', 'message': 'Designing micro-app architecture...'})}\n\n"
-            await asyncio.sleep(0.4)
-        
-        # Research phase for Claude
         if request.model == "claude-sonnet-4.5" and os.getenv("PERPLEXITY_API_KEY"):
-            yield f"data: {json.dumps({'type': 'status', 'message': '🔍 Researching real-time data sources...'})}\n\n"
-            await asyncio.sleep(0.8)
-        
-        yield f"data: {json.dumps({'type': 'status', 'message': 'Writing HTML structure...'})}\n\n"
-        await asyncio.sleep(0.5)
-        
-        yield f"data: {json.dumps({'type': 'status', 'message': 'Crafting modern CSS styles...'})}\n\n"
-        await asyncio.sleep(0.5)
-        
-        yield f"data: {json.dumps({'type': 'status', 'message': 'Adding JavaScript interactions...'})}\n\n"
-        await asyncio.sleep(0.5)
+            yield f"data: {json.dumps({'type': 'status', 'message': '🌐 Web search tools activated...'})}\n\n"
+            await asyncio.sleep(0.4)
         
         yield f"data: {json.dumps({'type': 'status', 'message': '⚡ Generating code with AI...'})}\n\n"
         
-        # Generate code with token tracking
         if request.current_code:
             result = update_existing_code(
                 current_code=request.current_code,
@@ -144,12 +250,8 @@ async def generate_stream(request: GenerateRequest):
         tokens_used = result['total_tokens']
         token_usage = result['token_usage']
         
-        yield f"data: {json.dumps({'type': 'status', 'message': 'Finalizing micro-app...'})}\n\n"
-        await asyncio.sleep(0.3)
-        
         generation_success = True
         
-        # Send complete result with token info
         yield f"data: {json.dumps({'type': 'complete', 'html': html_result, 'total_tokens': tokens_used, 'token_usage': token_usage})}\n\n"
         
     except Exception as e:
@@ -160,7 +262,7 @@ async def generate_stream(request: GenerateRequest):
 
 @app.post("/generate")
 async def generate_code_stream(request: GenerateRequest):
-    """Streaming endpoint for code generation"""
+    """Streaming endpoint for code generation (backward compatible)"""
     return StreamingResponse(
         generate_stream(request),
         media_type="text/event-stream",
@@ -172,49 +274,10 @@ async def generate_code_stream(request: GenerateRequest):
     )
 
 
-# ==================== FALLBACK SYNC ENDPOINT ====================
-
-@app.post("/generate-sync", response_model=GenerateResponse)
-async def generate_code_sync(request: GenerateRequest):
-    """Non-streaming endpoint for compatibility"""
-    try:
-        if request.model not in ["llama-3.3-70b", "claude-sonnet-4.5"]:
-            raise HTTPException(status_code=400, detail="Invalid model selected")
-        
-        if request.current_code:
-            result = update_existing_code(
-                current_code=request.current_code,
-                user_message=request.prompt,
-                chat_history=[msg.dict() for msg in request.chat_history],
-                model_name=request.model
-            )
-        else:
-            result = generate_initial_code(
-                prompt=request.prompt,
-                model_name=request.model
-            )
-        
-        return GenerateResponse(
-            html=result['html'],
-            success=True,
-            total_tokens=result['total_tokens'],
-            token_usage=result['token_usage']
-        )
-    
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        return GenerateResponse(
-            html="",
-            success=False,
-            error=str(e),
-            total_tokens=0
-        )
-
-
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     print(f"🚀 Starting Garliq AI Agent Service on port {port}")
     print(f"🔑 Perplexity API: {'✅ Configured' if os.getenv('PERPLEXITY_API_KEY') else '❌ Not configured'}")
-    print(f"🌐 Features: Real-time web search, Citations, Token tracking")
+    print(f"🌐 Features: Real-time web search, Citations, Token tracking, Async processing")
     uvicorn.run(app, host="0.0.0.0", port=port)
