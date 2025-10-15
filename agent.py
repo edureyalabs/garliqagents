@@ -113,7 +113,7 @@ def get_llm(model_name: str):
         return LLM(
             model="anthropic/claude-sonnet-4-20250514",
             temperature=0.7,
-            max_tokens=50000
+            max_tokens=40000
         )
     else:  # Default to Llama Groq
         return LLM(
