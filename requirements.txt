@@ -5,3 +5,4 @@ langchain-groq
 langchain-anthropic
 python-dotenv
 pydantic
+supabase
