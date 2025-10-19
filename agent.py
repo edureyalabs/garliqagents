@@ -43,9 +43,9 @@ class PerplexityAITool(BaseTool):
             
             # Updated model selection based on search depth - using new model names
             model_map = {
-                "quick": "sonar",  # Updated from llama-3.1-sonar-small-128k-online
-                "balanced": "sonar",  # Updated from llama-3.1-sonar-large-128k-online
-                "deep": "sonar-pro"  # Updated from llama-3.1-sonar-huge-128k-online
+                "quick": "sonar",
+                "balanced": "sonar",
+                "deep": "sonar-pro"
             }
             
             model = model_map.get(search_depth, "sonar")
@@ -288,7 +288,7 @@ REMEMBER: Research first if needed, then build something AMAZING!
     html = result.raw
     html = html.replace('```html\n', '').replace('```html', '').replace('```', '').strip()
     
-    # Extract token usage - FIXED: Access attributes directly instead of using .get()
+    # Extract token usage - Access attributes directly
     token_usage_obj = result.token_usage
     
     # Create a dictionary with safe access
@@ -375,7 +375,7 @@ Implement the changes now:
     html = result.raw
     html = html.replace('```html\n', '').replace('```html', '').replace('```', '').strip()
     
-    # Extract token usage - FIXED: Access attributes directly
+    # Extract token usage - Access attributes directly
     token_usage_obj = result.token_usage
     
     if token_usage_obj:

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import os
@@ -116,13 +116,7 @@ async def process_generation_background(request: AsyncGenerateRequest):
         
         # ==================== SAVE TO DATABASE ====================
         if html_result and generation_success:
-            # Save chat messages
-            supabase.table('chat_messages').insert({
-                'session_id': request.session_id,
-                'role': 'user',
-                'content': request.prompt
-            }).execute()
-
+            # ✅ FIXED: Only save assistant message (user message already saved in sessions/route.ts)
             supabase.table('chat_messages').insert({
                 'session_id': request.session_id,
                 'role': 'assistant',
@@ -209,69 +203,6 @@ async def generate_code_async(request: AsyncGenerateRequest, background_tasks: B
         "message": "Generation started in background",
         "session_id": request.session_id
     })
-
-
-# ==================== STREAMING GENERATION (Keep for backward compatibility) ====================
-
-async def generate_stream(request: GenerateRequest):
-    """Stream generation progress to frontend with token tracking"""
-    tokens_used = 0
-    generation_success = False
-    html_result = ""
-    
-    try:
-        if request.model not in ["llama-3.3-70b", "claude-sonnet-4.5"]:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Invalid model selected'})}\n\n"
-            return
-        
-        yield f"data: {json.dumps({'type': 'status', 'message': 'Initializing AI agent...'})}\n\n"
-        await asyncio.sleep(0.3)
-        
-        if request.model == "claude-sonnet-4.5" and os.getenv("PERPLEXITY_API_KEY"):
-            yield f"data: {json.dumps({'type': 'status', 'message': '🌐 Web search tools activated...'})}\n\n"
-            await asyncio.sleep(0.4)
-        
-        yield f"data: {json.dumps({'type': 'status', 'message': '⚡ Generating code with AI...'})}\n\n"
-        
-        if request.current_code:
-            result = update_existing_code(
-                current_code=request.current_code,
-                user_message=request.prompt,
-                chat_history=[msg.dict() for msg in request.chat_history],
-                model_name=request.model
-            )
-        else:
-            result = generate_initial_code(
-                prompt=request.prompt,
-                model_name=request.model
-            )
-        
-        html_result = result['html']
-        tokens_used = result['total_tokens']
-        token_usage = result['token_usage']
-        
-        generation_success = True
-        
-        yield f"data: {json.dumps({'type': 'complete', 'html': html_result, 'total_tokens': tokens_used, 'token_usage': token_usage})}\n\n"
-        
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Generation error: {error_msg}")
-        yield f"data: {json.dumps({'type': 'error', 'message': error_msg, 'tokens_used': tokens_used})}\n\n"
-
-
-@app.post("/generate")
-async def generate_code_stream(request: GenerateRequest):
-    """Streaming endpoint for code generation (backward compatible)"""
-    return StreamingResponse(
-        generate_stream(request),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
-        }
-    )
 
 
 if __name__ == "__main__":
