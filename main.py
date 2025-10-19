@@ -12,6 +12,17 @@ from supabase import create_client, Client
 
 load_dotenv()
 
+# ==================== INITIALIZE SUPABASE CLIENT ====================
+# Security: Credentials are now stored in backend environment variables only
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
+    raise ValueError("❌ SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in environment variables")
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+print("✅ Supabase client initialized securely from backend environment")
+
 app = FastAPI(title="Garliq AI Agent Service - Next Gen")
 
 app.add_middleware(
@@ -37,8 +48,9 @@ class GenerateRequest(BaseModel):
     session_id: str = None
 
 class AsyncGenerateRequest(GenerateRequest):
-    supabase_url: str
-    supabase_key: str
+    # Security: Removed supabase_url and supabase_key from request
+    # Backend now uses its own credentials
+    pass
 
 class GenerateResponse(BaseModel):
     html: str
@@ -61,22 +73,28 @@ def read_root():
             "Daily generation limits for free tier",
             "Enhanced micro-app generation",
             "Automatic citations and sources",
-            "Async background processing"
-        ]
+            "Async background processing",
+            "Secure credential management"
+        ],
+        "security": "Supabase credentials managed server-side"
     }
 
 @app.get("/health")
 def health_check():
     perplexity_configured = bool(os.getenv("PERPLEXITY_API_KEY"))
+    supabase_configured = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+    
     return {
         "status": "healthy",
         "perplexity_configured": perplexity_configured,
+        "supabase_configured": supabase_configured,
         "features": {
             "search": "Perplexity AI unified (research + web)" if perplexity_configured else "Not configured",
             "real_time_data": perplexity_configured,
             "citations": perplexity_configured,
             "token_tracking": True,
-            "async_processing": True
+            "async_processing": True,
+            "secure_db_access": supabase_configured
         }
     }
 
@@ -85,7 +103,7 @@ def health_check():
 
 async def process_generation_background(request: AsyncGenerateRequest):
     """Process generation in background and update Supabase"""
-    supabase: Client = create_client(request.supabase_url, request.supabase_key)
+    # Security: Using the global supabase client initialized from backend env vars
     
     tokens_used = 0
     generation_success = False
@@ -116,7 +134,7 @@ async def process_generation_background(request: AsyncGenerateRequest):
         
         # ==================== SAVE TO DATABASE ====================
         if html_result and generation_success:
-            # ✅ FIXED: Only save assistant message (user message already saved in sessions/route.ts)
+            # Save assistant message
             supabase.table('chat_messages').insert({
                 'session_id': request.session_id,
                 'role': 'assistant',
@@ -195,7 +213,12 @@ async def generate_code_async(request: AsyncGenerateRequest, background_tasks: B
     """
     Async endpoint - Returns immediately, processes in background
     Frontend listens to Supabase Realtime for status updates
+    Security: No credentials passed from frontend
     """
+    # Validate required fields
+    if not request.session_id or not request.user_id:
+        raise HTTPException(status_code=400, detail="session_id and user_id are required")
+    
     background_tasks.add_task(process_generation_background, request)
     
     return JSONResponse({
@@ -210,5 +233,6 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     print(f"🚀 Starting Garliq AI Agent Service on port {port}")
     print(f"🔑 Perplexity API: {'✅ Configured' if os.getenv('PERPLEXITY_API_KEY') else '❌ Not configured'}")
-    print(f"🌐 Features: Real-time web search, Citations, Token tracking, Async processing")
+    print(f"🔒 Supabase: {'✅ Configured securely' if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY else '❌ Not configured'}")
+    print(f"🌐 Features: Real-time web search, Citations, Token tracking, Async processing, Secure credentials")
     uvicorn.run(app, host="0.0.0.0", port=port)
