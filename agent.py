@@ -1,7 +1,7 @@
 from crewai import Agent, Task, Crew, LLM
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
-from typing import Optional, Type, Dict, Any, List
+from typing import Optional, Type, Dict, Any, List, Union
 from dotenv import load_dotenv
 import os
 import requests
@@ -13,9 +13,9 @@ load_dotenv()
 
 class PerplexitySearchInput(BaseModel):
     """Input schema for Perplexity Search API - returns ranked web results with snippets"""
-    query: str = Field(..., description="The search query. Can be a single query or use this tool multiple times for different queries.")
+    query: Union[str, List[str]] = Field(..., description="The search query. Can be a single query string or a list of queries for multi-query search.")
     max_results: int = Field(default=10, description="Maximum number of search results to return (1-20). Use 5 for quick checks, 10 for standard, 15-20 for comprehensive research.")
-    search_context_size: int = Field(default=2048, description="Tokens retrieved per webpage (1024-4096). Higher = more context but slower. Use 1024 for quick, 2048 for balanced, 4096 for deep analysis.")
+    max_tokens_per_page: int = Field(default=2048, description="Maximum tokens retrieved per webpage (1024-4096). Higher = more context but slower. Use 1024 for quick, 2048 for balanced, 4096 for deep analysis.")
 
 class PerplexitySearchTool(BaseTool):
     name: str = "perplexity_search"
@@ -39,7 +39,7 @@ class PerplexitySearchTool(BaseTool):
     """
     args_schema: Type[BaseModel] = PerplexitySearchInput
     
-    def _run(self, query: str, max_results: int = 10, search_context_size: int = 2048) -> str:
+    def _run(self, query: Union[str, List[str]], max_results: int = 10, max_tokens_per_page: int = 2048) -> str:
         """Execute Perplexity Search API - returns ranked results"""
         try:
             api_key = os.getenv("PERPLEXITY_API_KEY")
@@ -51,7 +51,7 @@ class PerplexitySearchTool(BaseTool):
             payload = {
                 "query": query,
                 "max_results": min(max(max_results, 1), 20),  # Clamp between 1-20
-                "search_context_size": max(min(search_context_size, 4096), 1024)  # Clamp between 1024-4096
+                "max_tokens_per_page": max(min(max_tokens_per_page, 4096), 1024)  # Clamp between 1024-4096
             }
             
             headers = {
@@ -65,7 +65,8 @@ class PerplexitySearchTool(BaseTool):
             data = response.json()
             
             # Format results for agent consumption
-            result = f"🔍 SEARCH RESULTS for: '{query}'\n"
+            query_display = query if isinstance(query, str) else ", ".join(query)
+            result = f"🔍 SEARCH RESULTS for: '{query_display}'\n"
             result += f"📊 Found {len(data.get('results', []))} results\n\n"
             
             for idx, item in enumerate(data.get('results', []), 1):
@@ -96,23 +97,22 @@ class PerplexityChatInput(BaseModel):
         - 'sonar-pro': Advanced search with better grounding (recommended for most cases)
         - 'sonar-deep-research': Comprehensive multi-step research (slowest, most thorough)
         - 'sonar-reasoning': For complex reasoning tasks with step-by-step logic
+        - 'sonar-reasoning-pro': Advanced reasoning with enhanced capabilities
         """
+    )
+    max_tokens: int = Field(default=4000, description="Maximum tokens in the response (1-8000). Use 2000 for concise, 4000 for standard, 8000 for comprehensive answers.")
+    temperature: float = Field(default=0.3, description="Creativity level (0.0-2.0). Use 0.2-0.3 for factual/technical, 0.7-1.0 for creative tasks.")
+    search_context_size: str = Field(
+        default="medium",
+        description="Amount of search context: 'low' (fast, less context), 'medium' (balanced), 'high' (comprehensive, slower)"
     )
     search_recency_filter: Optional[str] = Field(
         default=None,
-        description="Filter by time: 'hour', 'day', 'week', 'month'. Use for time-sensitive queries like 'latest', 'current', 'today'."
-    )
-    search_domain_filter: Optional[List[str]] = Field(
-        default=None,
-        description="Filter by domains. Include: ['github.com', 'stackoverflow.com']. Exclude: ['-reddit.com']. Max 3 domains."
+        description="Filter by time: 'hour', 'day', 'week', 'month', 'year'. Use for time-sensitive queries like 'latest', 'current', 'today'."
     )
     return_related_questions: bool = Field(
         default=False,
         description="Get follow-up question suggestions. Useful for exploring a topic deeper."
-    )
-    search_context_size: str = Field(
-        default="medium",
-        description="'low' (fast, less context), 'medium' (balanced), 'high' (comprehensive, slower)"
     )
 
 class PerplexityChatTool(BaseTool):
@@ -142,10 +142,11 @@ class PerplexityChatTool(BaseTool):
         self, 
         query: str, 
         model: str = "sonar-pro",
+        max_tokens: int = 4000,
+        temperature: float = 0.3,
+        search_context_size: str = "medium",
         search_recency_filter: Optional[str] = None,
-        search_domain_filter: Optional[List[str]] = None,
-        return_related_questions: bool = False,
-        search_context_size: str = "medium"
+        return_related_questions: bool = False
     ) -> str:
         """Execute Perplexity Chat Completions - returns AI-synthesized answer"""
         try:
@@ -156,10 +157,15 @@ class PerplexityChatTool(BaseTool):
             url = "https://api.perplexity.ai/chat/completions"
             
             # Validate model
-            valid_models = ["sonar", "sonar-pro", "sonar-deep-research", "sonar-reasoning"]
+            valid_models = ["sonar", "sonar-pro", "sonar-deep-research", "sonar-reasoning", "sonar-reasoning-pro"]
             if model not in valid_models:
                 model = "sonar-pro"
             
+            # Clamp parameters
+            max_tokens = max(min(max_tokens, 8000), 1)
+            temperature = max(min(temperature, 2.0), 0.0)
+            
+            # Build payload with correct structure
             payload = {
                 "model": model,
                 "messages": [
@@ -172,20 +178,17 @@ class PerplexityChatTool(BaseTool):
                         "content": query
                     }
                 ],
-                "temperature": 0.2,
-                "max_tokens": 4000,
-                "search_context_size": search_context_size
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "search": {
+                    "search_context_size": search_context_size  # Nested under "search" key
+                },
+                "return_related_questions": return_related_questions
             }
             
-            # Add optional parameters only if specified
-            if search_recency_filter:
+            # Add optional search_recency_filter only if specified
+            if search_recency_filter and search_recency_filter in ["hour", "day", "week", "month", "year"]:
                 payload["search_recency_filter"] = search_recency_filter
-            
-            if search_domain_filter and len(search_domain_filter) <= 3:
-                payload["search_domain_filter"] = search_domain_filter
-            
-            if return_related_questions:
-                payload["return_related_questions"] = True
             
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -215,10 +218,11 @@ class PerplexityChatTool(BaseTool):
                 result += "💡 RELATED QUESTIONS:\n"
                 for q in data.get('related_questions', [])[:5]:
                     result += f"- {q}\n"
+                result += "\n"
             
             # Add usage info
             usage = data.get('usage', {})
-            result += f"\n📊 Tokens: {usage.get('total_tokens', 'N/A')} | Model: {model}"
+            result += f"📊 Tokens: {usage.get('total_tokens', 'N/A')} | Model: {model}"
             
             return result
             
@@ -415,7 +419,6 @@ For COMPLEX research (clones, advanced features):
 - Local storage for persistence
 - Export/download functionality
 - Keyboard shortcuts
-- Responsive design (but prioritize desktop/web view)
 
 📋 STEP 4: SELF-VALIDATION (BEFORE RETURNING)
 
